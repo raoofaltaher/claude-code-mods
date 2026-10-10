@@ -227,8 +227,13 @@ export function target(tool: string, input: unknown, cwd: string): string {
     case 'write':
       return shortPath(field(input, 'file_path', 'notebook_path', 'path'), cwd)
     case 'shell':
-    case 'delete':
-      return field(input, 'description') || commandOf(input).split(/\r?\n/)[0]!.trim()
+    case 'delete': {
+      // The command itself, never the model's own description of it: the row
+      // is the record of what ran. A multi-line command says so up front,
+      // where cutting the line to fit cannot hide it.
+      const lines = commandOf(input).trim().split(/\r?\n/)
+      return lines.length > 1 ? `(${lines.length} lines) ${lines[0]!.trim()}` : lines[0]!.trim()
+    }
     case 'search':
       return field(input, 'pattern', 'query')
     case 'web': {
@@ -251,9 +256,13 @@ export function target(tool: string, input: unknown, cwd: string): string {
   }
 }
 
-/** Cut to `room` characters, keeping the end of a path and the start of anything else. */
+/**
+ * Cut to `room` characters, keeping the end of a path and the start of
+ * anything else. Control characters (terminal escapes among them) are dropped:
+ * a file name or command must not restyle or rewrite the screen.
+ */
 export function fit(text: string, room: number, isPath: boolean): string {
-  const flat = text.replace(/\s+/g, ' ')
+  const flat = text.replace(/\s+/g, ' ').replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
   if (room < 4 || flat.length <= room) return room < 4 ? '' : flat
   return isPath ? `…${flat.slice(flat.length - room + 1)}` : `${flat.slice(0, room - 1)}…`
 }

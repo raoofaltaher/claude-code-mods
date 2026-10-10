@@ -10,6 +10,12 @@
       "title": "Account order",
       "description": "Profile labels (folder names under ~/.claude-accounts), comma-separated, first in line first. Unlisted accounts follow alphabetically.",
       "default": ""
+    },
+    "claudePath": {
+      "type": "string",
+      "title": "claude executable",
+      "description": "Full path to the claude executable when it is not at ~/.local/bin/claude (claude.exe on Windows). It is never looked up by name.",
+      "default": ""
     }
   }
 }

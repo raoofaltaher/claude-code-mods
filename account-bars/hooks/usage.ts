@@ -102,6 +102,11 @@ export function agoText(asOf: number | undefined, now: number): string {
   return hours < 48 ? `${hours}h ago` : `${Math.round(hours / 24)}d ago`
 }
 
+/** Text from outside the mod (a folder name) with control characters, terminal escapes among them, removed. */
+export function printable(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

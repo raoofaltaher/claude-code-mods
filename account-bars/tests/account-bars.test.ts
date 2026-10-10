@@ -2,29 +2,35 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { band, effectivePercent, parseUsage } from '../hooks/usage'
+import { parseProbe } from '../hooks/probe'
+import { band, effectivePercent, parseUsage, printable } from '../hooks/usage'
 
 // Every identity, token and organization below is synthetic.
 const HOME = 'C:\\Users\\tester'
 const ROOT = `${HOME}\\.claude-accounts`
-const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
+const CLAUDE = `${HOME}\\.local\\bin\\claude.exe`
+const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
 const NOW = Date.parse('2030-01-01T00:00:00Z')
 const SOON = '2030-01-01T05:00:00Z'
 const LATER = '2030-01-05T00:00:00Z'
+const ESCAPED = 'evil\u001b]0;pwned\u0007'
 
 const IDENTITIES: Record<string, { email: string; orgId: string }> = {
   '': { email: 'w1@example.test', orgId: 'org-a' },
   [`${ROOT}\\work2`]: { email: 'w2@example.test', orgId: 'org-a' },
   [`${ROOT}\\personal`]: { email: 'me@example.test', orgId: 'org-b' },
+  [`${ROOT}\\lapsed`]: { email: 'w3@example.test', orgId: 'org-a' },
+  [`${ROOT}\\${ESCAPED}`]: { email: 'w4@example.test', orgId: 'org-a' },
 }
-const TOKENS: Record<string, string> = {
-  [`${ROOT}\\work2`]: 'synthetic-token-work2',
-  [`${ROOT}\\personal`]: 'synthetic-token-personal',
+/** What each profile's helper would print: its usage, a lapsed login (401), or no login. */
+const PROBES: Record<string, { five: number; seven: number } | 401> = {
+  [`${ROOT}\\work2`]: { five: 12, seven: 40 },
+  [`${ROOT}\\personal`]: { five: 3, seven: 5 },
+  [`${ROOT}\\lapsed`]: 401,
+  [`${ROOT}\\${ESCAPED}`]: { five: 1, seven: 1 },
 }
-const USAGE_BY_TOKEN: Record<string, { five: number; seven: number }> = {
-  'synthetic-token-work2': { five: 12, seven: 40 },
-  'synthetic-token-personal': { five: 3, seven: 5 },
-}
+/** The tokens the profiles' files would hold: none may ever reach the mod. */
+const TOKENS = ['synthetic-token-work2', 'synthetic-token-personal']
 
 const PANE = {
   plugin: 'account-bars',
@@ -35,7 +41,7 @@ const PANE = {
     isFocused: false,
     bodyColumns: 40,
     placement: 'dock',
-    scroll: { offset: 0, bodyRows: 30 },
+    scroll: { offset: 0, bodyRows: 40 },
     view: {},
   },
 } as const
@@ -50,20 +56,22 @@ const LIMIT_HIT = {
 }
 
 type World = {
+  runs: { argv: readonly string[]; cwd: string | undefined; env: Record<string, string> | undefined }[]
+  fsReads: string[]
   fetches: { url: string; authorization: string | undefined }[]
   toasts: string[]
   notices: string[]
   store: Map<string, unknown>
-  /** What the plugin last wrote to each of its state keys. */
   state: Map<string, unknown>
 }
 
-/** The machine beneath the plugin: three profile folders, one of them signed out. */
-function world(on: On): World {
-  const w: World = { fetches: [], toasts: [], notices: [], store: new Map(), state: new Map() }
+/** The machine beneath the plugin: five profile folders, one signed out, one lapsed, one oddly named. */
+function world(on: On, { hasClaude = true } = {}): World {
+  const w: World = { runs: [], fsReads: [], fetches: [], toasts: [], notices: [], store: new Map(), state: new Map() }
   const dir = (name: string) => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })
+  const file = { kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false }
 
-  mock.env(on, { USERPROFILE: HOME })
+  mock.env(on, { USERPROFILE: HOME, SystemRoot: 'C:\\Windows' })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.measure', ($, e) => ({ changed: e.changed }))
   on('state.set', { plugin: 'account-bars' }, ($, e, next) => {
@@ -85,26 +93,38 @@ function world(on: On): World {
     w.notices.push(e.text)
     return { value: { isSent: true as const, channel: 'terminal_bell' } }
   })
+  on('fs.stat', ($, e) =>
+    e.path === POWERSHELL || (hasClaude && e.path === CLAUDE) ? { value: file } : { deny: 'no such file' },
+  )
   on('fs.list', ($, e) =>
-    e.path === ROOT ? { value: [dir('personal'), dir('spare'), dir('work2')] } : { deny: 'no such folder' },
+    e.path === ROOT
+      ? { value: ['personal', 'spare', 'work2', 'lapsed', ESCAPED].map(dir) }
+      : { deny: 'no such folder' },
   )
   on('fs.read', ($, e) => {
-    const token = TOKENS[e.path.replace(/\\\.credentials\.json$/, '')]
-    return token
-      ? { value: JSON.stringify({ claudeAiOauth: { accessToken: token, expiresAt: NOW + 8 * 3_600_000 } }) }
-      : { deny: 'no such file' }
+    w.fsReads.push(e.path)
+    return { deny: 'no such file' }
   })
   on('process.run', ($, e) => {
-    const who = IDENTITIES[e.init?.env?.CLAUDE_CONFIG_DIR ?? '']
-    return {
-      value: {
-        exitCode: who ? 0 : 1,
-        stdout: JSON.stringify(who ? { loggedIn: true, ...who } : { loggedIn: false }),
-        stderr: '',
-        isStdoutTruncated: false,
-        isStderrTruncated: false,
-      },
+    w.runs.push({ argv: e.argv, cwd: e.init?.cwd, env: e.init?.env })
+    const out = (stdout: string, exitCode = 0) => ({
+      value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+    })
+    if (e.argv[0] === CLAUDE) {
+      const who = IDENTITIES[e.init?.env?.CLAUDE_CONFIG_DIR ?? '']
+      return out(JSON.stringify(who ? { loggedIn: true, ...who } : { loggedIn: false }), who ? 0 : 1)
     }
+    if (e.argv[0] === POWERSHELL) {
+      const probe = PROBES[e.init?.env?.ACCOUNT_BARS_PROFILE ?? '']
+      if (probe === undefined) return out('none')
+      if (probe === 401) return out(`expires ${NOW - 1000}\nstatus 401\n`)
+      const body = {
+        five_hour: { utilization: probe.five, resets_at: SOON },
+        seven_day: { utilization: probe.seven, resets_at: LATER },
+      }
+      return out(`expires ${NOW + 8 * 3_600_000}\r\nstatus 200\r\n${JSON.stringify(body)}\r\n`)
+    }
+    return { deny: `unexpected program ${e.argv[0]}` }
   })
   on('session.authorize', () => ({ value: null }))
   on('session.usage', () => ({
@@ -118,23 +138,16 @@ function world(on: On): World {
     },
   }))
   on('http.fetch', ($, e) => {
-    const authorization = e.init?.headers?.Authorization
-    w.fetches.push({ url: e.url, authorization })
-    const usage = USAGE_BY_TOKEN[authorization?.replace(/^Bearer /, '') ?? '']
-    if (usage === undefined) return { value: { status: 401, ok: false, headers: {}, text: '' } }
-    const body = {
-      five_hour: { utilization: usage.five, resets_at: SOON },
-      seven_day: { utilization: usage.seven, resets_at: LATER },
-    }
-    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
+    w.fetches.push({ url: e.url, authorization: e.init?.headers?.Authorization })
+    return { value: { status: 500, ok: false, headers: {}, text: '' } }
   })
   return w
 }
 
-async function start($: Engine, on: On) {
-  const w = world(on)
+async function start($: Engine, on: On, setup?: { hasClaude?: boolean }) {
+  const w = world(on, setup)
   const clock = mock.clock(on, { now: NOW })
-  await $.session.start({ cwd: HOME, surface: 'terminal', isInteractive: true })
+  await $.session.start({ cwd: 'C:\\some\\cloned\\repo', surface: 'terminal', isInteractive: true })
   await clock.advance(1) // the first refresh runs detached from session.start
   return { w, clock }
 }
@@ -158,20 +171,36 @@ describe('readings', () => {
       session: { percent: 42, resetsAt: SOON },
     })
   })
+
+  test("the helper's output is read line by line, and nothing else is a reading", () => {
+    expect(parseProbe('none\r\n')).toEqual({ isSignedIn: false })
+    expect(parseProbe('expires 5\nstatus 200\n{"five_hour":{"utilization":7}}')).toEqual({
+      isSignedIn: true,
+      expiresAt: 5,
+      status: 200,
+      windows: { session: { percent: 7 } },
+    })
+    expect(parseProbe('Invoke-WebRequest : something failed')).toBeUndefined()
+  })
+
+  test('control characters are stripped from outside text', () => {
+    expect(printable(ESCAPED)).toBe('evil]0;pwned')
+  })
 })
 
 describe('sidebar', () => {
-  test('draws every account, suggests a same-org one, and shows no e-mail or token', async ($, on) => {
+  test('draws every account, suggests a same-org one, and shows no e-mail, token or escape', async ($, on) => {
     const { w } = await start($, on)
-    expect(w.state.get('nextUp')).toBe('work2')
+    expect(w.state.get('nextUp')).toBe('evil]0;pwned')
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await $.ui.mount({ ...PANE, surface })
-      for (const label of ['this session', 'work2', 'personal', 'spare']) {
+      for (const label of ['this session', 'work2', 'personal', 'spare', 'lapsed', 'evil]0;pwned']) {
         expect(await ui.find({ key: `row-${label}` })).toBeDefined()
       }
       expect(await ui.find({ type: 'Text', text: /other org, never suggested/ })).toBeDefined()
       expect(await ui.find({ type: 'Text', text: /not signed in/ })).toBeDefined()
-      expect(await ui.find({ text: /@|synthetic-token|org-/ })).toBeUndefined()
+      expect(await ui.find({ type: 'Text', text: /sign-in expired/ })).toBeDefined()
+      expect(await ui.find({ text: /@|synthetic-token|org-|[\u0000-\u001f]/ })).toBeUndefined()
       await ui.unmount()
     }
   })
@@ -189,15 +218,33 @@ describe('sidebar', () => {
   })
 })
 
-describe('credentials', () => {
-  test('tokens go only to the usage endpoint and are never kept', async ($, on) => {
+describe('what the mod runs and touches', () => {
+  test('runs programs only by full path, from the home folder, never from the project', async ($, on) => {
     const { w } = await start($, on)
-    const withToken = w.fetches.filter(f => f.authorization !== undefined)
-    expect(withToken.length).toBeGreaterThan(0)
-    expect(withToken.every(f => f.url === USAGE_URL)).toBe(true)
-    const kept = JSON.stringify([...w.store.entries()])
-    const shown = JSON.stringify(w.state.get('accounts'))
-    for (const text of [kept, shown]) expect(text).not.toMatch(/synthetic-token|@example\.test|org-/)
+    expect(w.runs.length).toBeGreaterThan(0)
+    for (const run of w.runs) {
+      expect([CLAUDE, POWERSHELL]).toContain(run.argv[0])
+      expect(run.cwd).toBe(HOME)
+    }
+  })
+
+  test('no token passes through the mod: no credentials read, no token header, none in any event', async ($, on) => {
+    const { w } = await start($, on)
+    expect(w.fsReads.filter(path => path.endsWith('.credentials.json'))).toEqual([])
+    expect(w.fetches.filter(f => f.authorization !== undefined)).toEqual([])
+    const crossed = JSON.stringify([w.runs, [...w.store.entries()], [...w.state.entries()]])
+    for (const token of TOKENS) expect(crossed).not.toContain(token)
+    expect(crossed).not.toMatch(/Bearer [^'+]/)
+    const kept = JSON.stringify([[...w.store.entries()], w.state.get('accounts')])
+    expect(kept).not.toMatch(/@example\.test|org-/)
+  })
+
+  test('without claude at its path nothing is run by name, and the sidebar says why', async ($, on) => {
+    const { w } = await start($, on, { hasClaude: false })
+    expect(w.runs.some(run => /claude/i.test(run.argv[0] ?? ''))).toBe(false)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /claude not found at .*claudePath/ })).toBeDefined()
+    await ui.unmount()
   })
 })
 
@@ -207,11 +254,11 @@ describe('session limit', () => {
     await $.session.measure(LIMIT_HIT)
     await clock.advance(1)
     expect(w.notices).toHaveLength(1)
-    expect(w.notices[0]).toMatch(/Next in line: work2 \(session 12%, weekly 40%\)\. Run \/login/)
+    expect(w.notices[0]).toMatch(/Next in line: evil\]0;pwned \(session 1%, weekly 1%\)\. Run \/login/)
     expect(w.toasts).toContain(w.notices[0])
     await $.session.measure(LIMIT_HIT)
     await clock.advance(1)
     expect(w.notices).toHaveLength(1)
-    expect(w.notices.join(' ')).not.toMatch(/personal/)
+    expect(w.notices.join(' ')).not.toMatch(/personal|[\u0000-\u001f]/)
   })
 })

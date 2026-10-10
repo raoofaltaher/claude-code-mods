@@ -28,6 +28,8 @@ declare module 'claude-code' {
       isCompact: boolean
       nextUp: string | null
       now: number
+      /** A setup problem to show above the bars (claude or the helper not found); null when none. */
+      notice: string | null
     }
   }
 }

@@ -66,9 +66,9 @@ describe('labels and targets', () => {
     expect(target('Read', { file_path: 'C:\\work\\app\\README.md' }, 'C:\\work\\app')).toBe('README.md')
   })
 
-  test('shell lines prefer the description, web lines show the host', () => {
-    expect(target('Bash', { command: 'ls -la', description: 'List files' }, '')).toBe('List files')
-    expect(target('Bash', { command: 'git log\n--oneline' }, '')).toBe('git log')
+  test('shell lines show the command itself, never its description; web lines show the host', () => {
+    expect(target('Bash', { command: 'rm -rf ~/notes', description: 'List files' }, '')).toBe('rm -rf ~/notes')
+    expect(target('Bash', { command: 'git log\n--oneline' }, '')).toBe('(2 lines) git log')
     expect(target('WebFetch', { url: 'https://docs.example.com/a/b', prompt: 'p' }, '')).toBe('docs.example.com')
   })
 
@@ -76,6 +76,10 @@ describe('labels and targets', () => {
     expect(fit('a/very/long/path/to/file.ts', 12, true)).toBe('…/to/file.ts')
     expect(fit('a long description here', 10, false)).toBe('a long de…')
     expect(fit('short', 20, false)).toBe('short')
+  })
+
+  test('control characters never reach the row', () => {
+    expect(fit('notes\u001b[2K\u001b]0;title\u0007.txt', 40, true)).toBe('notes[2K]0;title.txt')
   })
 
   test('a folded group counts its calls by kind', () => {

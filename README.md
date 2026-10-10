@@ -107,6 +107,7 @@ Tips:
 | `c` or `[ compact ]` / `[ expand ]` | One row per account, or the full view with reset times and status. |
 | `r` or `[ refresh ]` | Same as `/accounts refresh`. |
 | `/config` → account-bars → `order` | Your preferred order, e.g. `work1,work2,personal`. Unlisted accounts follow alphabetically. |
+| `/config` → account-bars → `claudePath` | The full path to `claude`, if it isn't at `~/.local/bin/claude` (`claude.exe` on Windows), the native installer's place. The mod never looks `claude` up by name. |
 
 Where the sidebar sits:
 
@@ -125,6 +126,7 @@ Status lines under each account:
 | `not signed in` | The folder exists but holds no login. |
 | `other org, never suggested` | Tracked, but in a different organization from the account you are signed into. |
 | `paused` | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set, so other accounts are not polled. |
+| a yellow line at the top | A setup problem: `claude`, or the program that reads other accounts, was not found at its fixed path. |
 
 **At the session limit:**
 
@@ -152,7 +154,13 @@ Today it takes **the first account in your order, whatever its numbers**. That c
 | Account | Where its numbers come from | Credential involved |
 | --- | --- | --- |
 | The one this session is signed into | Readings Claude Code itself pushes to mods after every reply, plus the usage endpoint through Claude Code's credential handle | none: the mod never sees the secret |
-| Every profile under `~/.claude-accounts/` | `GET https://api.anthropic.com/api/oauth/usage` (the endpoint Claude Code's own `/usage` reads), every 2 minutes | that profile's access token, read from its `.credentials.json` for the request only |
+| Every profile under `~/.claude-accounts/` | `GET https://api.anthropic.com/api/oauth/usage` (the endpoint Claude Code's own `/usage` reads), every 2 minutes, made by a **short-lived helper process** | that profile's access token, which only the helper ever reads |
+
+The helper reads the profile's `.credentials.json`, makes the request, and prints only three things: when the login expires, the HTTP status, and the usage numbers.
+- **On Windows** it is Windows PowerShell 5.1, at its fixed path under `%SystemRoot%`.
+- **On Linux** it is `/bin/sh` with `/usr/bin/curl`. The token reaches `curl` on its standard input, never on a command line.
+- **The profile folder** is passed to the helper in an environment variable, never pasted into a command.
+- The helper's script is in [`account-bars/hooks/probe.ts`](account-bars/hooks/probe.ts).
 
 To recognise accounts and organizations, the mod runs `claude auth status --json`:
 
@@ -161,12 +169,16 @@ To recognise accounts and organizations, the mod runs `claude auth status --json
 
 ### Security and privacy
 
-- **Tokens:**
-  - Sent only to `https://api.anthropic.com`.
-  - Never written anywhere by the mod: not its saved data, not its shared state, the screen, logs or notifications.
+- **Tokens never enter the mod.**
+  - The session's own account is read through Claude Code's credential handle, which keeps the secret inside Claude Code.
+  - Every other account is read by the helper process above.
+  - So no token passes through the mod, or through the events other installed mods can hook (file reads, web requests, process runs).
+  - Tokens are only ever sent to `https://api.anthropic.com`.
+- **Programs run only by full path, from your home folder.** That is `claude` (or your `claudePath`) and the helper. A program looked up by name could resolve to a file planted in a cloned repository's folder.
+- **Text from outside is cleaned:** folder names have control characters, terminal escapes among them, removed before they are drawn or put in a notification.
 - **What is saved:** only labels, percentages and reset times.
 - **E-mails and organization IDs:** held in memory only. Other mods can read a mod's shared state, so these are kept out of it.
-- **Credentials files:** the mod never writes them, never refreshes a login itself, and never switches accounts. Claude Code manages every profile's sign-in.
+- **Credentials files:** the mod itself never reads or writes them, never refreshes a login, and never switches accounts. Claude Code manages every profile's sign-in.
 - **Same organization only:** suggestions never move a work conversation to an account outside its organization.
 - **No-traffic setting:** `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` stops all polling of other accounts.
 
@@ -174,6 +186,7 @@ To recognise accounts and organizations, the mod runs `claude auth status --json
 
 - **Undocumented endpoint:** Anthropic can change or restrict the usage endpoint without notice. If it does, the affected accounts show `no reading, retrying` instead of breaking. The account you are signed into keeps updating from Claude Code's own readings.
 - **Plain-text logins:** each profile is a full Claude Code login on disk, stored like your main one (`.credentials.json`). Keep your disk encrypted.
+- **macOS:** Claude Code keeps logins in the macOS Keychain, not in `.credentials.json`, so extra profiles show `not signed in` there. The account you are signed into still works. Tested on Windows. The Linux helper was tested under Git Bash with `curl`.
 - **Token renewal:** access tokens last about 8 hours. When one is close to expiry, the mod runs `claude auth status` for that profile so Claude Code can renew it. If a profile still lapses, it shows `sign-in expired`.
 - **Terms of use:** switching stays manual by design. Anthropic's terms restrict account sharing and getting around usage limits, so check your plan's terms before relying on several accounts.
 
@@ -185,6 +198,7 @@ account-bars/
   hooks/hooks.json             names the hooks module
   hooks/register.tsx           sidebar, /accounts, polling, limit notice
   hooks/usage.ts               parsing, bands, bars, time text
+  hooks/probe.ts               the helper that reads other accounts (Windows PowerShell, sh + curl)
   hooks/next.ts                pickNext(): who is suggested
   types/index.d.ts             the mod's state contract
   tests/account-bars.test.ts   colour bands, parsing, drawing, credential handling, limit notice
@@ -208,3 +222,7 @@ Colored icons at the start of each tool line, such as read, edit, write, delete,
 ```
 
 `/icons` previews everything. `/icons <style>`, `/icons <theme>`, `/icons badge | gradient | plain` and `/icons off | on` change it. Some styles need a Nerd Font, such as Cascadia Mono NF.
+
+- Shell lines show the **command itself**, never the model's description of it. A multi-line command is marked, e.g. `(3 lines) …`.
+- The red delete icon is a hint read from the command's wording, not a safety check.
+- `tool-icons` only redraws transcript rows, never the approval dialog.

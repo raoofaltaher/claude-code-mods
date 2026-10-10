@@ -4,6 +4,7 @@ import type { Register } from 'claude-code'
 import type { AccountStatus, AccountView, Reading } from '../types'
 import { pickNext } from './next'
 import type { Candidate } from './next'
+import { POWERSHELL_PROBE, PROFILE_VAR, SH_PROBE, parseProbe } from './probe'
 import {
   BAND_COLOR,
   USAGE_BETA,
@@ -15,13 +16,13 @@ import {
   fromRateLimits,
   isRecord,
   parseUsage,
+  printable,
   untilText,
 } from './usage'
 import type { Windows } from './usage'
 
 const PANE = 'accounts'
 const PROFILE_ROOT = '.claude-accounts'
-const CREDENTIALS = '.credentials.json'
 const POLL_MS = 2 * 60_000
 const IDENTIFY_MS = 10 * 60_000
 const CLOCK_MS = 30_000
@@ -31,6 +32,10 @@ const accounts = atom({ plugin: 'account-bars', key: 'accounts' } as const, [])
 const isCompact = atom({ plugin: 'account-bars', key: 'isCompact' } as const, false)
 const nextUp = atom({ plugin: 'account-bars', key: 'nextUp' } as const, null)
 const clock = atom({ plugin: 'account-bars', key: 'now' } as const, 0)
+const notice = atom({ plugin: 'account-bars', key: 'notice' } as const, null)
+
+/** An absolute path on Windows (`C:\…`, `\\server\…`) or elsewhere (`/…`). */
+const isAbsolute = (path: string) => /^([A-Za-z]:[\\/]|\\\\|\/)/.test(path)
 
 type Readings = Windows & { asOf?: number }
 
@@ -56,6 +61,7 @@ export const register: Register = (on, options) => {
     typeof options.order === 'string'
       ? options.order.split(',').map(label => label.trim()).filter(Boolean)
       : []
+  const claudePath = typeof options.claudePath === 'string' ? options.claudePath.trim() : ''
 
   let profiles: Profile[] = []
   let active: { email?: string; orgId?: string; readings: Readings } = { readings: {} }
@@ -79,30 +85,47 @@ export const register: Register = (on, options) => {
   }
 
   on('session.start', async ($, e, next) => {
-    const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? ''
-    const sep = home.includes('\\') ? '\\' : '/'
+    const systemRoot = await $.env.get('SystemRoot')
+    const isWindows = systemRoot !== undefined
+    const home = (isWindows ? await $.env.get('USERPROFILE') : await $.env.get('HOME')) ?? ''
+    const sep = isWindows ? '\\' : '/'
     const join = (...parts: string[]) => parts.join(sep)
-    let claudeExe: string | undefined
+    const isFile = async (path: string) => {
+      try {
+        return (await $.fs.stat(path)).kind === 'file'
+      } catch {
+        return false
+      }
+    }
+
+    // Programs run only by full path, from the home folder: a name looked up
+    // on PATH can resolve to a file a cloned repository planted in its folder.
+    const claudeExe = isAbsolute(claudePath)
+      ? claudePath
+      : join(home, '.local', 'bin', isWindows ? 'claude.exe' : 'claude')
+    const probeArgv = isWindows
+      ? [join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), '-NoProfile', '-NonInteractive', '-Command', POWERSHELL_PROBE]
+      : ['/bin/sh', '-c', SH_PROBE]
+    const helpers = isWindows ? [probeArgv[0]!] : [probeArgv[0]!, '/usr/bin/curl']
+    const hasClaude = await isFile(claudeExe)
+    const missingHelper = (await Promise.all(helpers.map(async path => ((await isFile(path)) ? null : path)))).find(
+      path => path !== null,
+    )
+    const hasProbe = missingHelper === undefined
+    const problems = [
+      ...(hasClaude ? [] : [`claude not found at ${claudeExe}: set claudePath in /config`]),
+      ...(hasProbe ? [] : [`${missingHelper} not found: other accounts cannot be read`]),
+    ]
 
     /** `claude auth status --json` for the session's login, or a profile's: identity only. */
     const authStatus = async (dir?: string) => {
-      const spellings = claudeExe
-        ? [claudeExe]
-        : ['claude', join(home, '.local', 'bin', 'claude.exe'), join(home, '.local', 'bin', 'claude')]
-      let stdout: string | undefined
-      for (const exe of spellings) {
-        try {
-          const init =
-            dir === undefined ? { timeoutMs: 30_000 } : { env: { CLAUDE_CONFIG_DIR: dir }, timeoutMs: 30_000 }
-          stdout = (await $.process.run([exe, 'auth', 'status', '--json'], init)).stdout
-          claudeExe = exe
-          break
-        } catch {
-          // could not start under this spelling: try the next
-        }
-      }
-      if (stdout === undefined) return undefined
+      if (!hasClaude) return undefined
       try {
+        const { stdout } = await $.process.run([claudeExe, 'auth', 'status', '--json'], {
+          cwd: home,
+          timeoutMs: 30_000,
+          ...(dir === undefined ? {} : { env: { CLAUDE_CONFIG_DIR: dir } }),
+        })
         const status: unknown = JSON.parse(stdout)
         if (!isRecord(status) || status.loggedIn !== true) return undefined
         return {
@@ -114,16 +137,16 @@ export const register: Register = (on, options) => {
       }
     }
 
-    /** A profile's access token and its expiry. The file's text goes out of scope at once. */
-    const readCredential = async (dir: string) => {
+    /** The profile's usage, read by the helper process; its token never reaches this mod. */
+    const runProbe = async (dir: string) => {
+      if (!hasProbe) return undefined
       try {
-        const file: unknown = JSON.parse(await $.fs.read(join(dir, CREDENTIALS)))
-        const oauth = isRecord(file) ? file.claudeAiOauth : undefined
-        if (!isRecord(oauth) || typeof oauth.accessToken !== 'string') return undefined
-        return {
-          token: oauth.accessToken,
-          expiresAt: typeof oauth.expiresAt === 'number' ? oauth.expiresAt : 0,
-        }
+        const { stdout } = await $.process.run(probeArgv, {
+          cwd: home,
+          env: { [PROFILE_VAR]: dir },
+          timeoutMs: 30_000,
+        })
+        return parseProbe(stdout)
       } catch {
         return undefined
       }
@@ -131,26 +154,29 @@ export const register: Register = (on, options) => {
 
     const identify = async () => {
       const root = join(home, PROFILE_ROOT)
-      let labels: string[] = []
+      let names: string[] = []
       try {
-        labels = (await $.fs.list(root)).filter(entry => entry.kind === 'dir').map(entry => entry.name)
+        names = (await $.fs.list(root)).filter(entry => entry.kind === 'dir').map(entry => entry.name)
       } catch {
-        labels = []
+        names = []
       }
       const cached = await $.store.get('readings')
-      const known = new Map(profiles.map(p => [p.label, p]))
-      profiles = labels.map(
-        label =>
-          known.get(label) ?? {
+      const known = new Map(profiles.map(p => [p.dir, p]))
+      profiles = names.map(name => {
+        const dir = join(root, name)
+        const label = printable(name)
+        return (
+          known.get(dir) ?? {
             label,
-            dir: join(root, label),
+            dir,
             status: 'pending',
             readings: isRecord(cached) && isRecord(cached[label]) ? (cached[label] as Readings) : {},
             failures: 0,
             skipUntil: 0,
             renewTriedAt: 0,
-          },
-      )
+          }
+        )
+      })
       const me = await authStatus()
       active = { ...active, email: me?.email, orgId: me?.orgId }
       for (const p of profiles) {
@@ -186,33 +212,26 @@ export const register: Register = (on, options) => {
     }
 
     const pollProfile = async (p: Profile, now: number) => {
-      let credential = await readCredential(p.dir)
-      if (credential && credential.expiresAt - now < RENEW_BEFORE_MS && now - p.renewTriedAt > IDENTIFY_MS) {
+      let probe = await runProbe(p.dir)
+      const expiresAt = probe?.isSignedIn ? probe.expiresAt : undefined
+      if (expiresAt !== undefined && expiresAt - now < RENEW_BEFORE_MS && now - p.renewTriedAt > IDENTIFY_MS) {
         p.renewTriedAt = now
         await authStatus(p.dir) // Claude Code renews its own login here, if it does so at all
-        credential = await readCredential(p.dir)
+        probe = await runProbe(p.dir)
       }
-      if (credential === undefined) {
+      if (probe === undefined) {
+        backOff(p, now)
+        return
+      }
+      if (!probe.isSignedIn) {
         p.status = 'not-signed-in'
         return
       }
-      if (credential.expiresAt <= now) {
+      if (probe.status === 401 || probe.status === 403) {
         p.status = 'expired'
         return
       }
-      let windows: Windows = {}
-      try {
-        const res = await $.http.fetch(USAGE_URL, {
-          headers: { Authorization: `Bearer ${credential.token}`, 'anthropic-beta': USAGE_BETA },
-        })
-        if (res.status === 401 || res.status === 403) {
-          p.status = 'expired'
-          return
-        }
-        if (res.ok) windows = parseUsage(res.text)
-      } catch {
-        // network or policy refusal: counted below
-      }
+      const windows: Windows = probe.status === 200 ? probe.windows : {}
       if (!windows.session && !windows.weekly) {
         backOff(p, now)
         return
@@ -278,6 +297,7 @@ export const register: Register = (on, options) => {
       await update($, accounts, () => views)
       await update($, nextUp, () => suggestion)
       await update($, clock, () => now)
+      await update($, notice, () => (problems.length === 0 ? null : problems.join(' · ')))
       await $.store.set(
         'readings',
         Object.fromEntries(profiles.filter(p => p.readings.asOf !== undefined).map(p => [p.label, p.readings])),
@@ -383,6 +403,7 @@ export const register: Register = (on, options) => {
     const compact = await read($, isCompact)
     const suggested = await read($, nextUp)
     const now = await read($, clock)
+    const problem = await read($, notice)
     const cols = Math.max(20, e.props.bodyColumns)
     const labelWidth = Math.min(12, Math.max(4, ...list.map(v => v.label.length)))
 
@@ -462,6 +483,11 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column">
+        {problem !== null && (
+          <Text color="warning" wrap="wrap">
+            {problem}
+          </Text>
+        )}
         <Text dimColor>{compact ? 'S 5-hour · W weekly' : 'S session (5-hour) · W weekly (7-day)'}</Text>
         <Box flexDirection="column" marginTop={1}>
           {rows}
