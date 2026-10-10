@@ -1,0 +1,9 @@
+{
+  "name": "tool-icons",
+  "version": "0.1.0",
+  "description": "Colored icons at the start of each tool line (read, edit, write, delete, shell, search, web, MCP, agents), in switchable styles and themes: /icons.",
+  "author": {
+    "name": "RAOOF A."
+  },
+  "types": "./types/index.d.ts"
+}
