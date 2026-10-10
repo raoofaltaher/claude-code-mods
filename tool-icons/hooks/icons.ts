@@ -167,13 +167,27 @@ const PLAN = new Set(['TodoWrite', 'TaskCreate', 'TaskUpdate', 'EnterPlanMode', 
 // A delete at a command position: start of line or after ; | & ( and spaces.
 const DELETE_COMMAND = /(^|[;&|(]\s*|\bsudo\s+)(rm|rmdir|del|erase|rd|remove-item|ri)\b/im
 
+const SHELLS = new Set(['Bash', 'PowerShell'])
+
 function commandOf(input: unknown): string {
   const command = (input as { command?: unknown } | null)?.command
   return typeof command === 'string' ? command : ''
 }
 
+/** A WebSocket a tool watches (Monitor's `ws.url`), when it names one. */
+function socketOf(input: unknown): string {
+  const ws = (input as { ws?: { url?: unknown } } | null)?.ws
+  return typeof ws?.url === 'string' ? ws.url : ''
+}
+
 export function kindOf(tool: string, input: unknown): Kind {
-  if (tool === 'Bash' || tool === 'PowerShell') return DELETE_COMMAND.test(commandOf(input).trim()) ? 'delete' : 'shell'
+  // Any built-in tool that carries a shell command (Bash, PowerShell, Monitor)
+  // is a shell row, so the row shows the command rather than prose about it.
+  // An MCP tool keeps its server's name, whatever its fields are called.
+  if (SHELLS.has(tool) || (!tool.startsWith('mcp__') && commandOf(input) !== '')) {
+    return DELETE_COMMAND.test(commandOf(input).trim()) ? 'delete' : 'shell'
+  }
+  if (!tool.startsWith('mcp__') && socketOf(input) !== '') return 'web'
   if (READ.has(tool)) return 'read'
   if (EDIT.has(tool)) return 'edit'
   if (tool === 'Write') return 'write'
@@ -197,7 +211,15 @@ export function mcpName(tool: string): string {
 export function label(kind: Kind, tool: string): string {
   if (kind === 'mcp') return mcpName(tool)
   if (kind === 'other' || kind === 'agent' || kind === 'plan') return tool
+  // a shell or web row from a tool other than the usual ones keeps its own name
+  if ((kind === 'shell' || kind === 'delete') && !SHELLS.has(tool)) return tool
+  if (kind === 'web' && !WEB.has(tool)) return tool
   return LABELS[kind]
+}
+
+/** Control and format characters (escapes, bidi overrides, zero-width marks) removed. */
+export function printable(text: string): string {
+  return text.replace(/[\p{Cc}\p{Cf}]/gu, '')
 }
 
 function field(input: unknown, ...names: string[]): string {
@@ -237,7 +259,7 @@ export function target(tool: string, input: unknown, cwd: string): string {
     case 'search':
       return field(input, 'pattern', 'query')
     case 'web': {
-      const url = field(input, 'url')
+      const url = field(input, 'url') || socketOf(input)
       if (url !== '') {
         try {
           return new URL(url).host
@@ -247,24 +269,36 @@ export function target(tool: string, input: unknown, cwd: string): string {
       }
       return field(input, 'query')
     }
+    // What a call acts on comes before any prose the model wrote about it.
     case 'agent':
-      return field(input, 'description', 'summary', 'to')
+      return field(input, 'to', 'name', 'scriptPath', 'subagent_type', 'description', 'summary')
+    case 'plan':
+      return [field(input, 'cron'), field(input, 'prompt')].filter(Boolean).join(' ') || field(input, 'description')
     case 'skill':
       return field(input, 'skill')
     default:
-      return field(input, 'description', 'query', 'name', 'title', 'path')
+      return field(input, 'command', 'url', 'to', 'cron', 'file_path', 'path', 'query', 'name', 'title', 'description')
   }
 }
 
+/** How `fit` cuts: a path keeps its end, a command its start and end, other text its start. */
+export type FitMode = 'path' | 'command' | 'text'
+
 /**
- * Cut to `room` characters, keeping the end of a path and the start of
- * anything else. Control characters (terminal escapes among them) are dropped:
- * a file name or command must not restyle or rewrite the screen.
+ * Cut to `room` characters. A command is never left out: it keeps at least
+ * 16, its head and its tail, so what a long line ends with stays in sight.
+ * Control and format characters are dropped: a file name or command must not
+ * restyle, reorder or rewrite the screen.
  */
-export function fit(text: string, room: number, isPath: boolean): string {
-  const flat = text.replace(/\s+/g, ' ').replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
-  if (room < 4 || flat.length <= room) return room < 4 ? '' : flat
-  return isPath ? `…${flat.slice(flat.length - room + 1)}` : `${flat.slice(0, room - 1)}…`
+export function fit(text: string, room: number, mode: FitMode): string {
+  const flat = printable(text.replace(/\s+/g, ' '))
+  const space = mode === 'command' ? Math.max(room, 16) : room
+  if (space < 4) return ''
+  if (flat.length <= space) return flat
+  if (mode === 'path') return `…${flat.slice(flat.length - space + 1)}`
+  if (mode === 'text') return `${flat.slice(0, space - 1)}…`
+  const head = Math.ceil((space - 1) / 2)
+  return `${flat.slice(0, head)}…${flat.slice(flat.length - (space - 1 - head))}`
 }
 
 const PHRASE: Readonly<Record<Kind, [string, string]>> = {

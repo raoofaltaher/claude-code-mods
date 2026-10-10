@@ -107,7 +107,7 @@ Tips:
 | `c` or `[ compact ]` / `[ expand ]` | One row per account, or the full view with reset times and status. |
 | `r` or `[ refresh ]` | Same as `/accounts refresh`. |
 | `/config` → account-bars → `order` | Your preferred order, e.g. `work1,work2,personal`. Unlisted accounts follow alphabetically. |
-| `/config` → account-bars → `claudePath` | The full path to `claude`, if it isn't at `~/.local/bin/claude` (`claude.exe` on Windows), the native installer's place. The mod never looks `claude` up by name. |
+| `/config` → account-bars → `claudePath` | The full path to `claude`, if it isn't at `~/.local/bin/claude` (`claude.exe` on Windows), the native installer's place. It must be a full path outside the project folder; the mod never looks `claude` up by name. |
 
 Where the sidebar sits:
 
@@ -121,7 +121,7 @@ Status lines under each account:
 | --- | --- |
 | `as of 40s ago` | Live reading. Accounts refresh every 2 minutes. The account you are signed into also updates after every reply. |
 | `reading…` | Not read yet. |
-| `sign-in expired` | That profile's login lapsed. Run `claude auth login` for it again (see above). |
+| `sign-in expired` | That profile's login lapsed. Run `claude auth login` for it again (see above). The mod tries it again every 10 minutes. |
 | `no reading, retrying` | The last read failed. The mod retries with back-off (up to 16 minutes). |
 | `not signed in` | The folder exists but holds no login. |
 | `other org, never suggested` | Tracked, but in a different organization from the account you are signed into. |
@@ -175,17 +175,21 @@ To recognise accounts and organizations, the mod runs `claude auth status --json
   - So no token passes through the mod, or through the events other installed mods can hook (file reads, web requests, process runs).
   - Tokens are only ever sent to `https://api.anthropic.com`.
 - **Programs run only by full path, from your home folder.** That is `claude` (or your `claudePath`) and the helper. A program looked up by name could resolve to a file planted in a cloned repository's folder.
-- **Text from outside is cleaned:** folder names have control characters, terminal escapes among them, removed before they are drawn or put in a notification.
+  - The Linux helper's own tools (`tr`, `sed`, `tail`) come only from `/usr/bin` and `/bin`. `curl` ignores `~/.curlrc` and allows https only.
+  - The Windows helper loads PowerShell's own modules only, and names every command with its module.
+  - When a helper fails, it prints only `error`, never the error text, which could quote the login it failed to read.
+- **Text from outside is cleaned:** folder names have control and format characters removed (terminal escapes, bidi overrides, zero-width marks) before they are drawn or put in a notification.
 - **What is saved:** only labels, percentages and reset times.
-- **E-mails and organization IDs:** held in memory only. Other mods can read a mod's shared state, so these are kept out of it.
-- **Credentials files:** the mod itself never reads or writes them, never refreshes a login, and never switches accounts. Claude Code manages every profile's sign-in.
+- **E-mails and organization IDs:** held in this mod's memory only, and never saved or shown. Other mods can read a mod's shared state, so these are kept out of it. They do pass through the `claude auth status` results, which another installed mod could hook.
+- **Credentials files:** the mod itself never reads or writes them, and never switches accounts. It never refreshes a login itself either: it asks Claude Code to (see Token renewal below). Claude Code manages every profile's sign-in.
 - **Same organization only:** suggestions never move a work conversation to an account outside its organization.
-- **No-traffic setting:** `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` stops all polling of other accounts.
+- **No-traffic setting:** `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` stops everything that touches other accounts: both their usage reads and their identity checks.
 
 ### Things to know
 
 - **Undocumented endpoint:** Anthropic can change or restrict the usage endpoint without notice. If it does, the affected accounts show `no reading, retrying` instead of breaking. The account you are signed into keeps updating from Claude Code's own readings.
 - **Plain-text logins:** each profile is a full Claude Code login on disk, stored like your main one (`.credentials.json`). Keep your disk encrypted.
+- **PowerShell logging:** if your organization turns on PowerShell module or script-block logging, Windows records the helper's runs. The script itself holds no token (it reads it at run time), but check what your logging captures before relying on that.
 - **macOS:** Claude Code keeps logins in the macOS Keychain, not in `.credentials.json`, so extra profiles show `not signed in` there. The account you are signed into still works. Tested on Windows. The Linux helper was tested under Git Bash with `curl`.
 - **Token renewal:** access tokens last about 8 hours. When one is close to expiry, the mod runs `claude auth status` for that profile so Claude Code can renew it. If a profile still lapses, it shows `sign-in expired`.
 - **Terms of use:** switching stays manual by design. Anthropic's terms restrict account sharing and getting around usage limits, so check your plan's terms before relying on several accounts.
@@ -223,6 +227,11 @@ Colored icons at the start of each tool line, such as read, edit, write, delete,
 
 `/icons` previews everything. `/icons <style>`, `/icons <theme>`, `/icons badge | gradient | plain` and `/icons off | on` change it. Some styles need a Nerd Font, such as Cascadia Mono NF.
 
-- Shell lines show the **command itself**, never the model's description of it. A multi-line command is marked, e.g. `(3 lines) …`.
+- Any built-in tool that runs a command (Bash, PowerShell, Monitor) shows the **command itself**, never the model's description of it.
+  - A multi-line command is marked, e.g. `(3 lines) …`.
+  - A long one keeps its start and its end, so what it ends with stays in sight.
+- Other tools show what they act on (a recipient, a schedule, a link) ahead of any description.
 - The red delete icon is a hint read from the command's wording, not a safety check.
 - `tool-icons` only redraws transcript rows, never the approval dialog.
+- Its rows show the call, not the tool's output. Run `/icons off` to see Claude Code's own rows, output and error text included.
+- Control and format characters are removed from every row: terminal escapes, bidi overrides and zero-width marks.

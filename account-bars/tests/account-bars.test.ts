@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { parseProbe } from '../hooks/probe'
+import { POWERSHELL_PROBE, SH_PROBE, parseProbe } from '../hooks/probe'
 import { band, effectivePercent, parseUsage, printable } from '../hooks/usage'
 
 // Every identity, token and organization below is synthetic.
@@ -66,12 +66,14 @@ type World = {
 }
 
 /** The machine beneath the plugin: five profile folders, one signed out, one lapsed, one oddly named. */
-function world(on: On, { hasClaude = true } = {}): World {
+type Setup = { hasClaude?: boolean; files?: readonly string[]; env?: Readonly<Record<string, string>> }
+
+function world(on: On, { hasClaude = true, files = [], env = {} }: Setup = {}): World {
   const w: World = { runs: [], fsReads: [], fetches: [], toasts: [], notices: [], store: new Map(), state: new Map() }
   const dir = (name: string) => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })
   const file = { kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false }
 
-  mock.env(on, { USERPROFILE: HOME, SystemRoot: 'C:\\Windows' })
+  mock.env(on, { USERPROFILE: HOME, SystemRoot: 'C:\\Windows', ...env })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.measure', ($, e) => ({ changed: e.changed }))
   on('state.set', { plugin: 'account-bars' }, ($, e, next) => {
@@ -94,7 +96,9 @@ function world(on: On, { hasClaude = true } = {}): World {
     return { value: { isSent: true as const, channel: 'terminal_bell' } }
   })
   on('fs.stat', ($, e) =>
-    e.path === POWERSHELL || (hasClaude && e.path === CLAUDE) ? { value: file } : { deny: 'no such file' },
+    e.path === POWERSHELL || (hasClaude && e.path === CLAUDE) || files.includes(e.path)
+      ? { value: file }
+      : { deny: 'no such file' },
   )
   on('fs.list', ($, e) =>
     e.path === ROOT
@@ -144,7 +148,7 @@ function world(on: On, { hasClaude = true } = {}): World {
   return w
 }
 
-async function start($: Engine, on: On, setup?: { hasClaude?: boolean }) {
+async function start($: Engine, on: On, setup?: Setup) {
   const w = world(on, setup)
   const clock = mock.clock(on, { now: NOW })
   await $.session.start({ cwd: 'C:\\some\\cloned\\repo', surface: 'terminal', isInteractive: true })
@@ -183,8 +187,26 @@ describe('readings', () => {
     expect(parseProbe('Invoke-WebRequest : something failed')).toBeUndefined()
   })
 
-  test('control characters are stripped from outside text', () => {
+  test('control and format characters are stripped from outside text', () => {
     expect(printable(ESCAPED)).toBe('evil]0;pwned')
+    expect(printable('work‮2​⁦x⁩')).toBe('work2x')
+  })
+
+  test('a helper that failed says only "error", and that is no reading', () => {
+    expect(parseProbe('error\r\n')).toBeUndefined()
+    expect(parseProbe('expires 5\nerror\n')).toBeUndefined()
+  })
+
+  test('the helpers keep a failure quiet and use only their own commands', () => {
+    // PowerShell: one try around everything, every command named with its module
+    expect(POWERSHELL_PROBE.startsWith('try{')).toBe(true)
+    expect(POWERSHELL_PROBE.endsWith("}catch{'error'}")).toBe(true)
+    expect(POWERSHELL_PROBE).not.toMatch(/(^|[^\\])\b(Join-Path|Test-Path|Get-Content|ConvertFrom-Json|Invoke-WebRequest)\b/)
+    expect(POWERSHELL_PROBE).not.toContain('"')
+    // sh: PATH pinned first, curl ignores ~/.curlrc, https only, nothing sent without a token
+    expect(SH_PROBE.split('\n')[0]).toBe('PATH=/usr/bin:/bin; export PATH')
+    expect(SH_PROBE).toContain('/usr/bin/curl -q -s --proto =https')
+    expect(SH_PROBE).toContain('[ -n "$t" ]')
   })
 })
 
@@ -237,6 +259,50 @@ describe('what the mod runs and touches', () => {
     expect(crossed).not.toMatch(/Bearer [^'+]/)
     const kept = JSON.stringify([[...w.store.entries()], w.state.get('accounts')])
     expect(kept).not.toMatch(/@example\.test|org-/)
+  })
+
+  test('the helper runs with its own module path and the profile folder, nothing else of note', async ($, on) => {
+    const { w } = await start($, on)
+    const probes = w.runs.filter(run => run.argv[0] === POWERSHELL)
+    expect(probes.length).toBeGreaterThan(0)
+    for (const run of probes) {
+      expect(run.env?.PSModulePath).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules')
+      expect(run.env?.ACCOUNT_BARS_PROFILE?.startsWith(`${ROOT}\\`)).toBe(true)
+    }
+  })
+
+  const PLANTED = 'C:\\some\\cloned\\repo\\tools\\claude.exe'
+  test('a claudePath inside the project folder is refused, even if the file is there', { options: { claudePath: PLANTED } }, async ($, on) => {
+    const { w } = await start($, on, { files: [PLANTED] })
+    expect(w.runs.some(run => run.argv[0] === PLANTED)).toBe(false)
+    expect(w.runs.some(run => run.argv[0] === CLAUDE)).toBe(true)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /claudePath is ignored/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  const ELSEWHERE = 'D:\\tools\\claude\\claude.exe'
+  test('a claudePath outside the project is used', { options: { claudePath: ELSEWHERE } }, async ($, on) => {
+    const { w } = await start($, on, { files: [ELSEWHERE] })
+    expect(w.runs.some(run => run.argv[0] === ELSEWHERE)).toBe(true)
+    expect(w.runs.some(run => run.argv[0] === CLAUDE)).toBe(false)
+  })
+
+  test('a lapsed login waits for the next identity check instead of every poll', async ($, on) => {
+    const { w, clock } = await start($, on)
+    const lapsed = () => w.runs.filter(run => run.env?.ACCOUNT_BARS_PROFILE === `${ROOT}\\lapsed`).length
+    const before = lapsed()
+    expect(before).toBeGreaterThan(0)
+    await clock.advance(2 * 60_000)
+    await clock.advance(2 * 60_000)
+    expect(lapsed()).toBe(before)
+    expect(w.runs.filter(run => run.env?.ACCOUNT_BARS_PROFILE === `${ROOT}\\work2`).length).toBeGreaterThan(1)
+  })
+
+  test('with non-essential traffic off, other accounts are not touched at all', async ($, on) => {
+    const { w } = await start($, on, { env: { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' } })
+    expect(w.runs.filter(run => run.argv[0] === POWERSHELL)).toEqual([])
+    expect(w.runs.filter(run => run.env?.CLAUDE_CONFIG_DIR !== undefined)).toEqual([])
   })
 
   test('without claude at its path nothing is run by name, and the sidebar says why', async ($, on) => {

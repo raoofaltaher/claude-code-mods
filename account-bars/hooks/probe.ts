@@ -12,33 +12,41 @@ export const PROFILE_VAR = 'ACCOUNT_BARS_PROFILE'
 /**
  * Windows PowerShell 5.1, which every Windows has at a fixed path. One line
  * with no double quotes, so it crosses a Windows command line unescaped.
+ * Every command is named with its module, so nothing earlier on the module
+ * path can stand in for it. Any failure prints `error` and nothing more: an
+ * error message could quote the login it failed to read.
  */
 export const POWERSHELL_PROBE =
-  "$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';" +
-  `$f=Join-Path $env:${PROFILE_VAR} '.credentials.json';` +
-  "if(-not(Test-Path -LiteralPath $f)){'none';exit};" +
-  '$raw=Get-Content -Raw -LiteralPath $f;' +
+  "try{$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';" +
+  `$f=Microsoft.PowerShell.Management\\Join-Path $env:${PROFILE_VAR} '.credentials.json';` +
+  "if(-not(Microsoft.PowerShell.Management\\Test-Path -LiteralPath $f)){'none';exit};" +
+  '$raw=Microsoft.PowerShell.Management\\Get-Content -Raw -LiteralPath $f;' +
   "if($raw -notmatch '.claudeAiOauth.\\s*:\\s*(\\{[^{}]*\\})'){'none';exit};" +
-  '$o=$Matches[1]|ConvertFrom-Json;' +
+  '$o=$Matches[1]|Microsoft.PowerShell.Utility\\ConvertFrom-Json;' +
   "'expires '+$o.expiresAt;" +
-  `try{$r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 20 -Uri '${USAGE_URL}' ` +
+  `try{$r=Microsoft.PowerShell.Utility\\Invoke-WebRequest -UseBasicParsing -TimeoutSec 20 -Uri '${USAGE_URL}' ` +
   `-Headers @{Authorization='Bearer '+$o.accessToken;'anthropic-beta'='${USAGE_BETA}'};` +
   "'status '+[int]$r.StatusCode;$r.Content}" +
-  "catch{$c=0;if($_.Exception.Response){$c=[int]$_.Exception.Response.StatusCode};'status '+$c}"
+  "catch{$c=0;if($_.Exception.Response){$c=[int]$_.Exception.Response.StatusCode};'status '+$c}" +
+  "}catch{'error'}"
 
 /**
- * POSIX sh and curl. The token goes to curl on its standard input (`-H @-`),
- * never on a command line another process could read.
+ * POSIX sh and curl. PATH is pinned, so `tr`, `sed` and `tail` come from the
+ * system's own folders. The token goes to curl on its standard input
+ * (`-H @-`), never on a command line; `-q` keeps a ~/.curlrc from adding
+ * options (verbose output would print the header), and only https is allowed.
  */
 export const SH_PROBE = [
+  'PATH=/usr/bin:/bin; export PATH',
   `f="$${PROFILE_VAR}/.credentials.json"`,
   '[ -f "$f" ] || { echo none; exit 0; }',
   `o=$(tr -d '\\r\\n' < "$f" | sed -n 's/.*"claudeAiOauth"[[:space:]]*:[[:space:]]*{\\([^{}]*\\)}.*/\\1/p')`,
   '[ -n "$o" ] || { echo none; exit 0; }',
   `t=$(printf '%s' "$o" | sed -n 's/.*"accessToken"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')`,
   `x=$(printf '%s' "$o" | sed -n 's/.*"expiresAt"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p')`,
+  '{ [ -n "$t" ] && [ -n "$x" ]; } || { echo error; exit 0; }',
   'echo "expires $x"',
-  `r=$(printf 'Authorization: Bearer %s\\n' "$t" | /usr/bin/curl -s -m 20 -H @- -H 'anthropic-beta: ${USAGE_BETA}' -w '\\n%{http_code}' '${USAGE_URL}')`,
+  `r=$(printf 'Authorization: Bearer %s\\n' "$t" | /usr/bin/curl -q -s --proto =https -m 20 -H @- -H 'anthropic-beta: ${USAGE_BETA}' -w '\\n%{http_code}' '${USAGE_URL}')`,
   `echo "status $(printf '%s\\n' "$r" | tail -n 1)"`,
   `printf '%s\\n' "$r" | sed '$d'`,
 ].join('\n')

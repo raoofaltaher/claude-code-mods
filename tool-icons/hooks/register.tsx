@@ -17,9 +17,10 @@ import {
   isTheme,
   kindOf,
   label,
+  printable,
   target,
 } from './icons'
-import type { Kind, ThemeName } from './icons'
+import type { FitMode, Kind, ThemeName } from './icons'
 
 const DEFAULTS: ToolIconsPrefs = { style: DEFAULT_STYLE, theme: DEFAULT_THEME, isOn: true, isBadge: false, isGradient: false }
 const prefsAtom = atom({ plugin: 'tool-icons', key: 'prefs' } as const, DEFAULTS)
@@ -71,7 +72,7 @@ export function applyArgs(prefs: ToolIconsPrefs, args: string): ToolIconsPrefs |
     else if (word === 'plain') next = { ...next, isBadge: false, isGradient: false, isOn: true }
     else if (isStyle(word)) next = { ...next, style: word, isOn: true }
     else if (isTheme(word)) next = { ...next, theme: word, isOn: true }
-    else return `Unknown "${word}".\n${USAGE}`
+    else return `Unknown "${printable(word)}".\n${USAGE}`
   }
   return next
 }
@@ -137,10 +138,11 @@ export const register: Register = on => {
     const look = lookOf(prefs)
     const { tool, input, isRunning, isErrored, isInterrupted } = e.props
     const kind = kindOf(tool, input)
-    const name = label(kind, tool)
+    const name = printable(label(kind, tool))
     const cwd = await $.session.cwd().catch(() => '')
     const room = (e.viewport?.columns ?? 100) - name.length - 20
-    const what = fit(target(tool, input, cwd), room, PATH_KINDS.has(kind))
+    const mode: FitMode = PATH_KINDS.has(kind) ? 'path' : kind === 'shell' || kind === 'delete' ? 'command' : 'text'
+    const what = fit(target(tool, input, cwd), room, mode)
 
     const parts = [iconCell(ui, look, kind), <ui.Text> </ui.Text>, ...labelCells(ui, look, kind, name)]
     if (what !== '') parts.push(<ui.Text dimColor>  {what}</ui.Text>)

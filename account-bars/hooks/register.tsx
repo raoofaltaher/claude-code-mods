@@ -85,11 +85,15 @@ export const register: Register = (on, options) => {
   }
 
   on('session.start', async ($, e, next) => {
+    // Paths from the environment are used only when absolute: an empty or
+    // relative home would put every run in the session's (a repo's) folder.
     const systemRoot = await $.env.get('SystemRoot')
-    const isWindows = systemRoot !== undefined
+    const isWindows = systemRoot !== undefined && /^[A-Za-z]:\\/.test(systemRoot)
     const home = (isWindows ? await $.env.get('USERPROFILE') : await $.env.get('HOME')) ?? ''
+    const isHomeUsable = isAbsolute(home)
     const sep = isWindows ? '\\' : '/'
     const join = (...parts: string[]) => parts.join(sep)
+    const shown = (path: string) => (isHomeUsable && path.startsWith(home) ? `~${path.slice(home.length)}` : path)
     const isFile = async (path: string) => {
       try {
         return (await $.fs.stat(path)).kind === 'file'
@@ -97,25 +101,38 @@ export const register: Register = (on, options) => {
         return false
       }
     }
+    /** Inside the session's folder, when that folder is not the home folder itself. */
+    const norm = (path: string) => path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+    const isInProject = (path: string) =>
+      norm(e.cwd) !== norm(home) && norm(path).startsWith(`${norm(e.cwd)}/`)
 
     // Programs run only by full path, from the home folder: a name looked up
-    // on PATH can resolve to a file a cloned repository planted in its folder.
-    const claudeExe = isAbsolute(claudePath)
-      ? claudePath
-      : join(home, '.local', 'bin', isWindows ? 'claude.exe' : 'claude')
+    // on PATH can resolve to a file a cloned repository planted in its folder,
+    // and a claudePath pointing into the project is refused for the same reason.
+    const isClaudePathUsable = isAbsolute(claudePath) && !isInProject(claudePath)
+    const claudeExe = isClaudePathUsable ? claudePath : join(home, '.local', 'bin', isWindows ? 'claude.exe' : 'claude')
     const probeArgv = isWindows
       ? [join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), '-NoProfile', '-NonInteractive', '-Command', POWERSHELL_PROBE]
       : ['/bin/sh', '-c', SH_PROBE]
+    // what the helper runs in: its own module folder, or the system's own bin folders
+    const probeEnv: Record<string, string> = isWindows
+      ? { PSModulePath: join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules') }
+      : { PATH: '/usr/bin:/bin' }
     const helpers = isWindows ? [probeArgv[0]!] : [probeArgv[0]!, '/usr/bin/curl']
-    const hasClaude = await isFile(claudeExe)
+    const hasClaude = isHomeUsable && (await isFile(claudeExe))
     const missingHelper = (await Promise.all(helpers.map(async path => ((await isFile(path)) ? null : path)))).find(
       path => path !== null,
     )
-    const hasProbe = missingHelper === undefined
-    const problems = [
-      ...(hasClaude ? [] : [`claude not found at ${claudeExe}: set claudePath in /config`]),
-      ...(hasProbe ? [] : [`${missingHelper} not found: other accounts cannot be read`]),
-    ]
+    const hasProbe = isHomeUsable && missingHelper === undefined
+    const problems = !isHomeUsable
+      ? ['no usable home folder in the environment: other accounts are not read']
+      : [
+          ...(claudePath !== '' && !isClaudePathUsable
+            ? ['claudePath is ignored: it must be a full path outside the project folder']
+            : []),
+          ...(hasClaude ? [] : [`claude not found at ${shown(claudeExe)}: set claudePath in /config`]),
+          ...(missingHelper === undefined ? [] : [`${missingHelper} not found: other accounts cannot be read`]),
+        ]
 
     /** `claude auth status --json` for the session's login, or a profile's: identity only. */
     const authStatus = async (dir?: string) => {
@@ -143,7 +160,7 @@ export const register: Register = (on, options) => {
       try {
         const { stdout } = await $.process.run(probeArgv, {
           cwd: home,
-          env: { [PROFILE_VAR]: dir },
+          env: { ...probeEnv, [PROFILE_VAR]: dir },
           timeoutMs: 30_000,
         })
         return parseProbe(stdout)
@@ -179,7 +196,13 @@ export const register: Register = (on, options) => {
       })
       const me = await authStatus()
       active = { ...active, email: me?.email, orgId: me?.orgId }
+      // with non-essential traffic off, other accounts are not touched at all
+      const isQuiet = Boolean(await $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'))
       for (const p of profiles) {
+        if (isQuiet) {
+          p.status = 'paused'
+          continue
+        }
         const who = await authStatus(p.dir)
         p.email = who?.email
         p.orgId = who?.orgId
@@ -228,7 +251,9 @@ export const register: Register = (on, options) => {
         return
       }
       if (probe.status === 401 || probe.status === 403) {
+        // a lapsed login is tried again with the next identity check, not every poll
         p.status = 'expired'
+        p.skipUntil = now + IDENTIFY_MS
         return
       }
       const windows: Windows = probe.status === 200 ? probe.windows : {}
