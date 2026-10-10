@@ -144,10 +144,14 @@ The policy lives in one function, `pickNext()` in [`account-bars/hooks/next.ts`]
 - its session and weekly percentages (already 0 once a window has reset);
 - when it was last read.
 
-Today it takes **the first account in your order, whatever its numbers**. That can name an account whose weekly limit is nearly used up. Change it to suit how you work, for example:
+The rule:
 
-- skip accounts at 90 % weekly or more, or with stale readings;
-- then prefer the most session room.
+1. Skip accounts whose login lapsed or that have none.
+2. Skip accounts at **90 % weekly or more** (`WEEKLY_CEILING`), since they would block soon after.
+3. Of the rest, take the one with the **most session room** (a window past its reset counts as empty), then your `order`.
+4. If none is fit, suggest nothing rather than an account about to block.
+
+Change the function to suit how you work.
 
 ### How it works
 

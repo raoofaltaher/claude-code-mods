@@ -2,6 +2,8 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
+import { pickNext } from '../hooks/next'
+import type { Candidate } from '../hooks/next'
 import { POWERSHELL_PROBE, SH_PROBE, parseProbe } from '../hooks/probe'
 import { band, effectivePercent, parseUsage, printable } from '../hooks/usage'
 
@@ -207,6 +209,25 @@ describe('readings', () => {
     expect(SH_PROBE.split('\n')[0]).toBe('PATH=/usr/bin:/bin; export PATH')
     expect(SH_PROBE).toContain('/usr/bin/curl -q -s --proto =https')
     expect(SH_PROBE).toContain('[ -n "$t" ]')
+  })
+})
+
+describe('who is next', () => {
+  const c = (label: string, rank: number, session?: number, weekly?: number, status: Candidate['status'] = 'ok'): Candidate => ({
+    label, rank, status, sessionPercent: session, weeklyPercent: weekly, asOf: NOW,
+  })
+
+  test('skips accounts nearly out of weekly use, then takes the most session room', () => {
+    expect(pickNext([c('a', 0, 2, 96), c('b', 1, 0, 67), c('c', 2, 15, 11)], NOW)).toBe('b')
+  })
+
+  test('skips lapsed logins, breaks ties by your order, suggests none when none is fit', () => {
+    expect(pickNext([c('a', 0, 0, 10, 'expired'), c('b', 2, 5, 10), c('c', 1, 5, 10)], NOW)).toBe('c')
+    expect(pickNext([c('a', 0, 0, 95), c('b', 1, 0, 90)], NOW)).toBeNull()
+  })
+
+  test('an account never read comes after every read one', () => {
+    expect(pickNext([c('new', 0), c('b', 1, 80, 10)], NOW)).toBe('b')
   })
 })
 
