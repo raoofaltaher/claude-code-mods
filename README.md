@@ -51,8 +51,6 @@ You need Claude Code with mods (function hooks), a Claude subscription login (Pr
 
 Answer `y` to add the marketplace, then pick a scope (user scope loads it in every session).
 
-> The repository is private for now. To install from it, you must have read access (ask the owner to add you as a collaborator), and your `git` must be signed in to GitHub, for example with `gh auth login` or Git Credential Manager.
-
 **From a local copy** of this repository:
 
 ```
