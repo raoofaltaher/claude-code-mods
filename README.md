@@ -119,10 +119,10 @@ Status lines under each account:
 
 | Line | Meaning |
 | --- | --- |
-| `as of 40s ago` | Live reading. Accounts refresh every 2 minutes. The account you are signed into also updates after every reply. |
+| `as of 40s ago` | Live reading. Other accounts refresh every 5 minutes. The account you are signed into also updates after every reply. |
 | `reading…` | Not read yet. |
 | `sign-in expired` | That profile's login lapsed. Run `claude auth login` for it again (see above). The mod tries it again every 10 minutes. |
-| `no reading, retrying` | The last read failed. The mod retries with back-off (up to 16 minutes). |
+| `no reading, retrying` | The last read failed. The mod retries with back-off (up to 40 minutes). If Anthropic answers "too many requests" (HTTP 429), that account waits 15 minutes. |
 | `not signed in` | The folder exists but holds no login. |
 | `other org, never suggested` | Tracked, but in a different organization from the account you are signed into. |
 | `paused` | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set, so other accounts are not polled. |
@@ -154,7 +154,7 @@ Today it takes **the first account in your order, whatever its numbers**. That c
 | Account | Where its numbers come from | Credential involved |
 | --- | --- | --- |
 | The one this session is signed into | Readings Claude Code itself pushes to mods after every reply, plus the usage endpoint through Claude Code's credential handle | none: the mod never sees the secret |
-| Every profile under `~/.claude-accounts/` | `GET https://api.anthropic.com/api/oauth/usage` (the endpoint Claude Code's own `/usage` reads), every 2 minutes, made by a **short-lived helper process** | that profile's access token, which only the helper ever reads |
+| Every profile under `~/.claude-accounts/` | `GET https://api.anthropic.com/api/oauth/usage` (the endpoint Claude Code's own `/usage` reads), every 5 minutes, made by a **short-lived helper process** | that profile's access token, which only the helper ever reads |
 
 The helper reads the profile's `.credentials.json`, makes the request, and prints only three things: when the login expires, the HTTP status, and the usage numbers.
 - **On Windows** it is Windows PowerShell 5.1, at its fixed path under `%SystemRoot%`.

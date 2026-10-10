@@ -293,8 +293,8 @@ describe('what the mod runs and touches', () => {
     const lapsed = () => w.runs.filter(run => run.env?.ACCOUNT_BARS_PROFILE === `${ROOT}\\lapsed`).length
     const before = lapsed()
     expect(before).toBeGreaterThan(0)
-    await clock.advance(2 * 60_000)
-    await clock.advance(2 * 60_000)
+    await clock.advance(5 * 60_000)
+    await clock.advance(4 * 60_000)
     expect(lapsed()).toBe(before)
     expect(w.runs.filter(run => run.env?.ACCOUNT_BARS_PROFILE === `${ROOT}\\work2`).length).toBeGreaterThan(1)
   })

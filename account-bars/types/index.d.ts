@@ -19,6 +19,8 @@ export type AccountView = {
   weekly?: Reading
   /** When the readings were taken, in `$.clock.now()` milliseconds. */
   asOf?: number
+  /** Why the last read failed, in a few words (no token, no address); absent when it did not. */
+  detail?: string
 }
 
 declare module 'claude-code' {

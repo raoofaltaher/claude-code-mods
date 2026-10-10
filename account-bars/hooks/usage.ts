@@ -110,6 +110,13 @@ export function printable(text: string): string {
   return text.replace(/[\p{Cc}\p{Cf}]/gu, '')
 }
 
+/** A short reason fit to show: token-shaped text replaced, one line, at most 80 characters. */
+export function scrub(text: string): string {
+  const line = printable(text.replace(/\s+/g, ' ')).trim()
+  const safe = line.replace(/sk-ant-[A-Za-z0-9_-]+/g, '[token]').replace(/(Bearer)\s+\S+/gi, '$1 [token]')
+  return safe.length > 80 ? `${safe.slice(0, 79)}…` : safe
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

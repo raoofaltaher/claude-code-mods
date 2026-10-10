@@ -5,6 +5,7 @@ import type { AccountStatus, AccountView, Reading } from '../types'
 import { pickNext } from './next'
 import type { Candidate } from './next'
 import { POWERSHELL_PROBE, PROFILE_VAR, SH_PROBE, parseProbe } from './probe'
+import type { Probe } from './probe'
 import {
   BAND_COLOR,
   USAGE_BETA,
@@ -17,13 +18,16 @@ import {
   isRecord,
   parseUsage,
   printable,
+  scrub,
   untilText,
 } from './usage'
 import type { Windows } from './usage'
 
 const PANE = 'accounts'
 const PROFILE_ROOT = '.claude-accounts'
-const POLL_MS = 2 * 60_000
+const POLL_MS = 5 * 60_000
+/** How long an account waits after the endpoint answers 429 (too many requests). */
+const RATE_LIMITED_MS = 15 * 60_000
 const IDENTIFY_MS = 10 * 60_000
 const CLOCK_MS = 30_000
 const RENEW_BEFORE_MS = 30 * 60_000
@@ -54,6 +58,8 @@ type Profile = {
   failures: number
   skipUntil: number
   renewTriedAt: number
+  /** Why the last read failed (scrubbed, short); undefined after a good read. */
+  detail?: string
 }
 
 export const register: Register = (on, options) => {
@@ -78,9 +84,10 @@ export const register: Register = (on, options) => {
     active.email === undefined ? undefined : profiles.find(p => p.email === active.email)
   const sameOrg = (p: Profile) =>
     p.orgId === undefined || active.orgId === undefined ? null : p.orgId === active.orgId
-  const backOff = (p: Profile, now: number) => {
+  const backOff = (p: Profile, now: number, detail?: string) => {
     p.failures += 1
     p.status = 'error'
+    p.detail = detail
     p.skipUntil = now + POLL_MS * Math.min(8, 2 ** (p.failures - 1))
   }
 
@@ -155,17 +162,21 @@ export const register: Register = (on, options) => {
     }
 
     /** The profile's usage, read by the helper process; its token never reaches this mod. */
-    const runProbe = async (dir: string) => {
-      if (!hasProbe) return undefined
+    const runProbe = async (dir: string): Promise<{ probe: Probe | undefined; reason?: string }> => {
+      if (!hasProbe) return { probe: undefined, reason: 'helper not available' }
       try {
-        const { stdout } = await $.process.run(probeArgv, {
+        const { stdout, stderr, exitCode } = await $.process.run(probeArgv, {
           cwd: home,
           env: { ...probeEnv, [PROFILE_VAR]: dir },
+          stdin: '',
           timeoutMs: 30_000,
         })
-        return parseProbe(stdout)
-      } catch {
-        return undefined
+        const probe = parseProbe(stdout)
+        if (probe !== undefined) return { probe }
+        const said = stdout.trim().split(/\r?\n/)[0] || stderr.trim() || 'no output'
+        return { probe: undefined, reason: scrub(`helper exit ${exitCode}: ${said}`) }
+      } catch (error) {
+        return { probe: undefined, reason: scrub(`helper did not run: ${error instanceof Error ? error.message : String(error)}`) }
       }
     }
 
@@ -235,15 +246,15 @@ export const register: Register = (on, options) => {
     }
 
     const pollProfile = async (p: Profile, now: number) => {
-      let probe = await runProbe(p.dir)
+      let { probe, reason } = await runProbe(p.dir)
       const expiresAt = probe?.isSignedIn ? probe.expiresAt : undefined
       if (expiresAt !== undefined && expiresAt - now < RENEW_BEFORE_MS && now - p.renewTriedAt > IDENTIFY_MS) {
         p.renewTriedAt = now
         await authStatus(p.dir) // Claude Code renews its own login here, if it does so at all
-        probe = await runProbe(p.dir)
+        ;({ probe, reason } = await runProbe(p.dir))
       }
       if (probe === undefined) {
-        backOff(p, now)
+        backOff(p, now, reason)
         return
       }
       if (!probe.isSignedIn) {
@@ -256,13 +267,22 @@ export const register: Register = (on, options) => {
         p.skipUntil = now + IDENTIFY_MS
         return
       }
+      if (probe.status === 429) {
+        // the endpoint asked us to slow down: keep the last numbers and wait
+        p.status = 'error'
+        p.detail = 'rate-limited, waiting 15m'
+        p.skipUntil = now + RATE_LIMITED_MS
+        return
+      }
       const windows: Windows = probe.status === 200 ? probe.windows : {}
       if (!windows.session && !windows.weekly) {
-        backOff(p, now)
+        const why = probe.status === 200 ? 'unexpected reply' : probe.status === 0 ? 'no connection' : `HTTP ${probe.status}`
+        backOff(p, now, why)
         return
       }
       p.readings = { ...windows, asOf: now }
       p.status = 'ok'
+      p.detail = undefined
       p.failures = 0
       p.skipUntil = 0
     }
@@ -289,6 +309,7 @@ export const register: Register = (on, options) => {
         isSameOrg: sameOrg(p),
         status: p.status,
         ...p.readings,
+        ...(p.detail === undefined ? {} : { detail: p.detail }),
       })
       const others = profiles
         .filter(p => p !== mine)
@@ -456,7 +477,7 @@ export const register: Register = (on, options) => {
         case 'expired':
           return 'sign-in expired: run claude auth login for this profile'
         case 'error':
-          return `no reading, retrying · last ${agoText(v.asOf, now)}`
+          return `no reading${v.detail ? ` (${v.detail})` : ''}, retrying · last ${agoText(v.asOf, now)}`
         case 'not-signed-in':
           return 'not signed in'
         case 'paused':
