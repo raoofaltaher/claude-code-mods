@@ -1,15 +1,10 @@
 {
   "name": "my-mods",
-  "description": "Claude Code mods: account limit bars (account-bars) and tool line icons (tool-icons).",
+  "description": "Claude Code mods: tool line icons (tool-icons).",
   "owner": {
     "name": "RAOOF A."
   },
   "plugins": [
-    {
-      "name": "account-bars",
-      "source": "./account-bars",
-      "description": "Right-side sidebar with session and weekly limit bars for each of your Claude accounts; suggests the next same-org account at the session limit: /accounts."
-    },
     {
       "name": "tool-icons",
       "source": "./tool-icons",
